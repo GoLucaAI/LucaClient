@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LUCA — Server Settings</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      background: #080e1a;
+      font-family: 'Courier New', monospace;
+      color: #c8d8e8;
+      overflow: hidden;
+      -webkit-app-region: drag;
+    }
+    .container {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      padding: 32px 40px;
+      gap: 16px;
+      -webkit-app-region: no-drag;
+    }
+    h1 {
+      font-size: .7rem;
+      letter-spacing: .25em;
+      color: #00d4ff;
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .subtitle {
+      font-size: .5rem;
+      letter-spacing: .08em;
+      color: rgba(0,212,255,.35);
+      line-height: 1.7;
+      margin-bottom: 8px;
+    }
+    .divider {
+      border: none;
+      border-top: 1px solid rgba(0,212,255,.1);
+    }
+    label {
+      font-size: .52rem;
+      letter-spacing: .1em;
+      color: rgba(0,212,255,.5);
+      text-transform: uppercase;
+    }
+    input {
+      width: 100%;
+      background: rgba(0,212,255,.05);
+      border: 1px solid rgba(0,212,255,.2);
+      color: #c8d8e8;
+      padding: 11px 14px;
+      font-family: 'Courier New', monospace;
+      font-size: .72rem;
+      border-radius: 3px;
+      outline: none;
+      transition: border-color .2s;
+    }
+    input:focus { border-color: #00d4ff; }
+    input::placeholder { color: rgba(0,212,255,.2); }
+    .row {
+      display: flex;
+      gap: 10px;
+    }
+    .btn {
+      flex: 1;
+      padding: 11px;
+      font-family: 'Courier New', monospace;
+      font-size: .65rem;
+      font-weight: 700;
+      letter-spacing: .12em;
+      border-radius: 3px;
+      border: none;
+      cursor: pointer;
+      transition: opacity .2s;
+    }
+    .btn:hover { opacity: .85; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-primary { background: #00d4ff; color: #000; }
+    .btn-ghost {
+      background: transparent;
+      color: rgba(0,212,255,.5);
+      border: 1px solid rgba(0,212,255,.2);
+    }
+    .feedback {
+      font-size: .52rem;
+      letter-spacing: .06em;
+      min-height: 18px;
+      text-align: center;
+    }
+    .feedback.error   { color: #ff6b6b; }
+    .feedback.success { color: #00d4ff; }
+    .current {
+      font-size: .5rem;
+      color: rgba(0,212,255,.3);
+      letter-spacing: .06em;
+      word-break: break-all;
+    }
+    .spacer { flex: 1; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>Server Settings</h1>
+  <p class="subtitle">
+    Most users never need this screen.<br>
+    Only change this if you self-host LUCA on your own server.
+  </p>
+
+  <hr class="divider">
+
+  <label>Custom Server URL</label>
+  <input id="url" type="url"
+    placeholder="https://your-luca-server.com"
+    autocomplete="off" autocorrect="off" spellcheck="false">
+
+  <p class="current" id="current-url"></p>
+
+  <div class="row">
+    <button class="btn btn-ghost" id="reset-btn" onclick="resetUrl()">USE DEFAULT</button>
+    <button class="btn btn-primary" id="save-btn" onclick="saveUrl()">SAVE &amp; RECONNECT</button>
+  </div>
+
+  <div class="feedback" id="feedback"></div>
+
+  <div class="spacer"></div>
+
+  <p class="current" style="text-align:center;">
+    Ctrl+Space (Win/Linux) &nbsp;·&nbsp; ⌘+Space (Mac) — summon LUCA anywhere
+  </p>
+</div>
+
+<script>
+  const { lucaDesktop } = window
+  const cfg = lucaDesktop ? lucaDesktop.getConfig() : {}
+
+  document.getElementById('url').value       = cfg.serverUrl || ''
+  document.getElementById('current-url').textContent =
+    'Current: ' + (cfg.serverUrl || cfg.defaultUrl || '—')
+
+  async function saveUrl () {
+    const url = document.getElementById('url').value.trim().replace(/\/$/, '')
+    const fb  = document.getElementById('feedback')
+    const btn = document.getElementById('save-btn')
+
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+      showFeedback('URL must start with https://', 'error'); return
+    }
+
+    btn.disabled = true
+    btn.textContent = 'SAVING…'
+    fb.className = 'feedback'
+    fb.textContent = ''
+
+    try {
+      const result = await lucaDesktop.saveServerUrl(url)
+      if (result.ok) {
+        showFeedback('Saved — reconnecting…', 'success')
+        document.getElementById('current-url').textContent = 'Current: ' + url
+        setTimeout(() => window.close(), 1200)
+      } else {
+        showFeedback(result.error || 'Failed to save', 'error')
+      }
+    } catch (e) {
+      showFeedback('Error: ' + e.message, 'error')
+    } finally {
+      btn.disabled = false
+      btn.textContent = 'SAVE & RECONNECT'
+    }
+  }
+
+  async function resetUrl () {
+    const btn = document.getElementById('reset-btn')
+    btn.disabled = true
+    try {
+      await lucaDesktop.resetServerUrl()
+      showFeedback('Reset to default — reconnecting…', 'success')
+      document.getElementById('url').value = ''
+      document.getElementById('current-url').textContent = 'Current: ' + (window.lucaDesktop.getConfig().defaultUrl || 'default')
+      setTimeout(() => window.close(), 1200)
+    } catch (e) {
+      showFeedback('Error: ' + e.message, 'error')
+    } finally {
+      btn.disabled = false
+    }
+  }
+
+  function showFeedback (msg, type) {
+    const fb = document.getElementById('feedback')
+    fb.textContent  = msg
+    fb.className    = 'feedback ' + type
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') saveUrl()
+    if (e.key === 'Escape') window.close()
+  })
+</script>
+</body>
+</html>
