@@ -1,0 +1,261 @@
+name: Build Desktop Installers
+
+on:
+  push:
+    tags:
+      - 'v*'             # push a git tag like v1.2.3 to trigger
+  workflow_dispatch:     # or trigger manually from the Actions tab
+
+jobs:
+
+  # ── Clean up previous installer artifacts ─────────────────────────────────
+  cleanup:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete previous artifacts from this workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const names = ['LUCA-Setup-Windows', 'LUCA-macOS', 'LUCA-Linux'];
+            for (const name of names) {
+              const { data } = await github.rest.actions.listArtifactsForRepo({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name,
+                per_page: 100,
+              });
+              for (const artifact of data.artifacts) {
+                core.info(`Deleting artifact ${artifact.name} (id ${artifact.id})`);
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                });
+              }
+            }
+
+  # ── Compute version once; share across all build jobs ─────────────────────
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+    steps:
+      - name: Compute version from tag
+        id: get_version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF_NAME" ]; then
+            VERSION="1.0.0"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  # ── Windows — NSIS installer (.exe + latest.yml) ─────────────────────────
+  build-windows:
+    needs: [cleanup, prepare]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Inject version into package.json
+        env:
+          PKG_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'desktop/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            pkg.version = process.env.PKG_VERSION;
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build Windows installer (unsigned)
+        working-directory: desktop
+        run: npm run build:win
+
+      # ── Upload unsigned build so SignPath can fetch it by artifact ID ─────────
+      - name: Upload unsigned installer for signing
+        id: upload_unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: LUCA-Setup-Windows-unsigned
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/latest.yml
+            desktop/dist/*.blockmap
+          if-no-files-found: error
+          retention-days: 1
+
+      # ── Sign with SignPath (non-blocking — unsigned exe ships if this fails) ──
+      - name: Sign installer via SignPath
+        id: signpath
+        continue-on-error: true
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token:                   '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id:             '${{ secrets.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug:                '${{ secrets.SIGNPATH_PROJECT_SLUG }}'
+          signing-policy-slug:         '${{ secrets.SIGNPATH_SIGNING_POLICY_SLUG }}'
+          artifact-configuration-slug: '${{ secrets.SIGNPATH_ARTIFACT_CONFIG_SLUG }}'
+          github-artifact-id:          '${{ steps.upload_unsigned.outputs.artifact-id }}'
+          github-token:                '${{ secrets.GITHUB_TOKEN }}'
+          wait-for-completion:         true
+          output-artifact-directory:   desktop/dist/signed
+
+      # ── Promote signed exe if signing succeeded; keep unsigned otherwise ────
+      - name: Promote signed files into dist
+        if: steps.signpath.outcome == 'success'
+        shell: pwsh
+        run: |
+          $signed = Get-ChildItem desktop/dist/signed -Recurse -Filter *.exe -ErrorAction SilentlyContinue
+          foreach ($f in $signed) {
+            $dest = Join-Path desktop/dist $f.Name
+            Copy-Item $f.FullName $dest -Force
+            Write-Host "Replaced $dest with signed copy"
+          }
+
+      - name: Upload installer + update manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: LUCA-Setup-Windows
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/latest.yml
+            desktop/dist/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── macOS — DMG disk image ─────────────────────────────────────────────────
+  build-macos:
+    needs: [cleanup, prepare]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Inject version into package.json
+        env:
+          PKG_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'desktop/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            pkg.version = process.env.PKG_VERSION;
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build macOS DMG
+        working-directory: desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run build:mac
+
+      - name: Upload DMG + zip + update manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: LUCA-macOS
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+            desktop/dist/latest-mac.yml
+            desktop/dist/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Linux — AppImage ───────────────────────────────────────────────────────
+  build-linux:
+    needs: [cleanup, prepare]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libnotify-dev libnss3 libxss1 libxtst6 xauth xvfb
+
+      - name: Inject version into package.json
+        env:
+          PKG_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          node -e "
+            const fs = require('fs');
+            const p = 'desktop/package.json';
+            const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
+            pkg.version = process.env.PKG_VERSION;
+            fs.writeFileSync(p, JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Install dependencies
+        working-directory: desktop
+        run: npm install
+
+      - name: Build Linux AppImage
+        working-directory: desktop
+        run: npm run build:linux
+
+      - name: Upload AppImage + update manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: LUCA-Linux
+          path: |
+            desktop/dist/*.AppImage
+            desktop/dist/latest-linux.yml
+            desktop/dist/*.blockmap
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── Publish to GitHub Release (on tag push only) ───────────────────────────
+  release:
+    needs: [build-windows, build-macos, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: LUCA ${{ github.ref_name }}
+          body: |
+            ## LUCA Desktop ${{ github.ref_name }}
+
+            | Platform | File | Notes |
+            |---|---|---|
+            | **Windows 10/11** | `LUCA-Setup-*.exe` | Installs silently — no dialogs |
+            | **macOS 12+** | `LUCA-*.dmg` | Open DMG → drag LUCA to Applications |
+            | **Linux** | `LUCA-*.AppImage` | `chmod +x LUCA-*.AppImage` then run |
+
+            Open the app and sign in — same account as the web dashboard.
+            Installed copies update automatically in the background.
+          files: dist/**/*
+          draft: false
+          prerelease: false
